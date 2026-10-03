@@ -136,14 +136,34 @@ static void* find_fit(int asize)
 {
     char *bp = heap_listp;
 
-    while (GET_ALLOC(bp) == 0 && GET_SIZE(bp) >= asize )
+    while (GET_SIZE(HDRP(bp)) != 0)//
     {
-        if (GET_SIZE(bp) == 0)
-            return NULL;
+        if ((GET_ALLOC(HDRP(bp)) == 0 && GET_SIZE(HDRP(bp)) >= asize))
+            return bp;
         bp = NEXT_BLKP(bp);
     }
-    return bp;
+    return NULL;
 }
+
+static void place(void *bp, int size)
+{
+    int free_size = GET_SIZE(HDRP(bp)) - size;
+
+    if (free_size == 0)
+    {
+        PUT(HDRP(bp), PACK(size, 1));
+        PUT(FTRP(bp), PACK(size, 1));
+        return;
+    }
+
+    char *free_ft = FTRP(bp);
+    PUT(HDRP(bp), PACK(size, 1));
+    PUT(FTRP(bp), PACK(size, 1));
+
+    PUT(FTRP(bp) + WSIZE, PACK(free_size,0));
+    PUT(free_ft, PACK(free_size,0));
+}
+
 
 /*
  * mm_init - malloc 패키지를 초기화해요.
@@ -167,6 +187,7 @@ int mm_init(void)
 
     return 0;
 }
+
 
 /*
  * mm_malloc - brk 포인터를 올려서 블록을 하나 할당해요.
@@ -196,7 +217,7 @@ void *mm_malloc(size_t size)
     // asize와 힙을 늘리는 최소사이즈중 큰값 고름
     extendsize = MAX(asize, CHUNKSIZE);
     // 힙 확장 가능 검사 + if 문으로 확장과 bp변경.
-    if ((bp = extend_heap(extendsize/WSIZE)) == NULL)
+    if ((bp = extend_heap(extendsize / WSIZE)) == NULL)
         return NULL;
     //
     place(bp, asize);
@@ -232,7 +253,7 @@ void *mm_realloc(void *ptr, size_t size)
     newptr = mm_malloc(size);
     if (newptr == NULL)
       return NULL;
-    copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
+    copySize = GET_SIZE(HDRP(ptr));
     if (size < copySize)
       copySize = size;
     memcpy(newptr, oldptr, copySize);
