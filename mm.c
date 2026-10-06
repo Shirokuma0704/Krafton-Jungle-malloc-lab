@@ -35,8 +35,10 @@ team_t team = {
     ""
 };
 
-static char *heap_listp;
 
+static char *heap_listp;
+// 가용리스트 헤드
+static char *free_listp;
 
 /* 싱글 워드(4) 또는 더블 워드(8) 정렬 */
 #define ALIGNMENT 8
@@ -57,57 +59,170 @@ static char *heap_listp;
 #define GET(p) (*(unsigned int *)(p))
 #define PUT(p, val) (*(unsigned int *)(p) = (val))
 
+#define GET_ADDRESS(p) (*(char **)(p))
+#define PUT_ADDRESS(slot, target) (*(unsigned int *)(slot) = (unsigned int)(target))
+
 #define GET_SIZE(p) (GET(p) & ~0x7)
 #define GET_ALLOC(p) (GET(p) & 0x1)
 
-#define HDRP(bp) ((char *)(bp) - WSIZE)
-#define FTRP(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)) - DSIZE)
+#define HEADER_ADDRESS(bp) ((char *)(bp) - WSIZE)
+#define FOOTER_ADDRESS(bp) ((char *)(bp) + GET_SIZE(HEADER_ADDRESS(bp)) - DSIZE)
 
 #define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE)))
 #define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE)))
+
+#define PRED(bp) ((char *)(bp))
+#define SUCC(bp) ((char *)(bp) + WSIZE)
 
 /* size_t 하나를 담을 칸의 크기를 정렬에 맞춘 값이에요.
    아래 mm_malloc과 mm_realloc이 블록 맨 앞에 요청 크기를 적어 두는 데 써요 */
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
 
+static void *put_free_listq (void *bp)
+{
+    char *head = free_listp;
+
+    if (head == NULL)
+    {
+        PUT_ADDRESS(SUCC(bp), NULL);
+        PUT_ADDRESS(PRED(bp), NULL);
+        free_listp = bp;
+        return bp;
+    }
+
+    PUT_ADDRESS(PRED(bp), NULL);
+    PUT_ADDRESS(SUCC(bp), head);
+    PUT_ADDRESS(PRED(head), bp);
+    free_listp = bp;
+
+}
+
+static void *pop_free_listq (void *target_free_ptr)
+{
+    char *succ, *pred;
+
+    succ = GET_ADDRESS(SUCC(target_free_ptr));
+    pred = GET_ADDRESS(PRED(target_free_ptr));
+
+    if (succ == NULL && pred == NULL)
+    {
+        free_listp = NULL;
+    }
+    else if (succ == NULL)
+    {
+        PUT_ADDRESS(SUCC(pred), NULL);
+    }
+    else if (pred == NULL)
+    {
+        PUT_ADDRESS(PRED(succ), NULL);
+        free_listp = succ;
+    }
+    else
+    {
+        PUT_ADDRESS(SUCC(pred), succ);
+        PUT_ADDRESS(PRED(succ), pred);
+    }
+}
 
 // free 블럭들의경계를 지워 큰 free 블럭으로 만드는 병합함수
 static void *coalesce(void *bp)
 {
-    size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));
-    size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
-    size_t size = GET_SIZE(HDRP(bp));
+    size_t prev_alloc = GET_ALLOC(FOOTER_ADDRESS(PREV_BLKP(bp)));
+    size_t next_alloc = GET_ALLOC(HEADER_ADDRESS(NEXT_BLKP(bp)));
+    size_t size = GET_SIZE(HEADER_ADDRESS(bp));
+
+    char *head = free_listp;
 
 
     // 앞뒤 둘다 배정됨
     if (prev_alloc && next_alloc)
     {
+        put_free_listq(bp);
         return bp;
     }
     // 뒤가 풀려있음
     else if (prev_alloc && !next_alloc)
     {
-        size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
-        PUT(HDRP(bp), PACK(size, 0));
-        PUT(FTRP(bp), PACK(size, 0));
+        char *pred = GET_ADDRESS(PRED(NEXT_BLKP(bp)));
+        char *succ = GET_ADDRESS(SUCC(NEXT_BLKP(bp)));
+        char *prev = NEXT_BLKP(bp);
+
+        size += GET_SIZE(HEADER_ADDRESS(NEXT_BLKP(bp)));
+        PUT(HEADER_ADDRESS(bp), PACK(size, 0));
+        PUT(FOOTER_ADDRESS(bp), PACK(size, 0));
+
+        pop_free_listq(prev);
+        put_free_listq(bp);
+        // 새블럭을 가용 리스트 삽입
+        // PUT_ADDRESS(PRED(bp), NULL);4
+        // PUT_ADDRESS(SUCC(bp), head);
+        // PUT_ADDRESS(PRED(head), bp);
+        // 합치기전 블럭을 빼고 이어줌
+        // if (succ != NULL) PUT_ADDRESS(SUCC(succ), pred);
+        // if (pred != NULL) PUT_ADDRESS(PRED(pred), succ);
+
+        return bp;
     }
     // 앞이 풀려있음
     else if (!prev_alloc && next_alloc)
     {
-        size += GET_SIZE(HDRP(PREV_BLKP(bp)));
-        PUT(FTRP(bp), PACK(size, 0));
-        PUT(HDRP(PREV_BLKP(bp)),PACK(size, 0));
-        bp = PREV_BLKP(bp);
+        char *pred = GET_ADDRESS(PRED(PREV_BLKP(bp)));
+        char *succ = GET_ADDRESS(SUCC(PREV_BLKP(bp)));
+
+        char *prev_bp = PREV_BLKP(bp);
+
+
+        size += GET_SIZE(HEADER_ADDRESS(PREV_BLKP(bp)));
+        PUT(FOOTER_ADDRESS(bp), PACK(size, 0));
+        PUT(HEADER_ADDRESS(PREV_BLKP(bp)),PACK(size, 0));
+
+
+        pop_free_listq(prev_bp);
+        put_free_listq(prev_bp);
+
+        // 새블럭을 가용 리스트 삽입
+        //PUT_ADDRESS(PRED(bp), NULL);
+        //PUT_ADDRESS(SUCC(bp), head);
+        //PUT_ADDRESS(PRED(head), bp);
+        // 합치기전 블럭을 빼고 이어줌
+        //if (succ != NULL) PUT_ADDRESS(SUCC(succ), pred);
+        //if (pred != NULL) PUT_ADDRESS(PRED(pred), succ);
+
+        return prev_bp;
     }
     // 양쪽 다 풀려있음
     else
     {
-        size += GET_SIZE((FTRP(PREV_BLKP(bp)))) + GET_SIZE(FTRP(NEXT_BLKP(bp)));
-        PUT(HDRP((PREV_BLKP(bp))), PACK(size, 0));
-        PUT(FTRP((NEXT_BLKP(bp))), PACK(size, 0));
+        char *prev = PREV_BLKP(bp);
+        char *next = NEXT_BLKP(bp);
+
+        //char *prev_pred = GET_ADDRESS(PRED(PREV_BLKP(bp)));
+        //char *prev_succ = GET_ADDRESS(SUCC(PREV_BLKP(bp)));
+        //char *next_pred = GET_ADDRESS(PRED(NEXT_BLKP(bp)));
+        //char *next_succ = GET_ADDRESS(SUCC(NEXT_BLKP(bp)));
+
+        size += GET_SIZE((FOOTER_ADDRESS(PREV_BLKP(bp)))) + GET_SIZE(FOOTER_ADDRESS(NEXT_BLKP(bp)));
+        PUT(HEADER_ADDRESS((PREV_BLKP(bp))), PACK(size, 0));
+        PUT(FOOTER_ADDRESS((NEXT_BLKP(bp))), PACK(size, 0));
+
+        pop_free_listq(prev);
+        pop_free_listq(next);
+
+        //PUT_ADDRESS(PRED(next_pred), next_succ);
+        //PUT_ADDRESS(SUCC(next_succ), next_pred);
+        //PUT_ADDRESS(PRED(prev_pred), prev_succ);
+        //PUT_ADDRESS(SUCC(prev_succ), prev_pred);
+
         bp = PREV_BLKP(bp);
+        put_free_listq(bp);
+        //PUT_ADDRESS(PRED(bp), NULL);
+        //PUT_ADDRESS(SUCC(bp), head);
+        //PUT_ADDRESS(PRED(head), bp);
+        return prev;
+
     }
-    return bp;
+    // free_listp = bp;
+    //return bp;
 }
 
 
@@ -115,6 +230,8 @@ static void *extend_heap(size_t words)
 {
     char *bp;
     size_t byte_size;
+
+
     // 홀수 패딩 추가후, word를 바이트 단위로 변환
     byte_size = (words % 2) ? (words + 1) * WSIZE : words * WSIZE;
 
@@ -123,45 +240,54 @@ static void *extend_heap(size_t words)
         return NULL;
 
     // 헤더 푸터
-    PUT(HDRP(bp), PACK(byte_size, 0));
-    PUT(FTRP(bp), PACK(byte_size, 0));
+    PUT(HEADER_ADDRESS(bp), PACK(byte_size, 0));
+    PUT(FOOTER_ADDRESS(bp), PACK(byte_size, 0));
 
     // 에필로그
-    PUT(HDRP(NEXT_BLKP(bp)), PACK(0,1));
+    PUT(HEADER_ADDRESS(NEXT_BLKP(bp)), PACK(0,1));
 
     return coalesce(bp);
 }
 
 static void* find_fit(int asize)
 {
-    char *bp = heap_listp;
+    char *head = free_listp;
+    if (head == NULL) return NULL;
 
-    while (GET_SIZE(HDRP(bp)) != 0)//
+    while (head != NULL) // 가용리스트 끝에 도달할때 까지
     {
-        if ((GET_ALLOC(HDRP(bp)) == 0 && GET_SIZE(HDRP(bp)) >= asize))
-            return bp;
-        bp = NEXT_BLKP(bp);
+        if (GET_SIZE(HEADER_ADDRESS(head)) >= asize)
+            return head;
+        head = GET_ADDRESS(SUCC(head));
     }
     return NULL;
 }
 
 static void place(void *bp, int size)
 {
-    int free_size = GET_SIZE(HDRP(bp)) - size;
+    int free_size = GET_SIZE(HEADER_ADDRESS(bp)) - size;
+    //char *succ = GET_ADDRESS(SUCC(bp));
+    //char *prev = GET_ADDRESS(PRED(bp));
 
-    if (free_size == 0)
+    if (free_size <= 16)
     {
-        PUT(HDRP(bp), PACK(size, 1));
-        PUT(FTRP(bp), PACK(size, 1));
+        pop_free_listq(bp);
+        size += free_size;
+        PUT(HEADER_ADDRESS(bp), PACK(size, 1));
+        PUT(FOOTER_ADDRESS(bp), PACK(size, 1));
         return;
     }
 
-    char *free_ft = FTRP(bp);
-    PUT(HDRP(bp), PACK(size, 1));
-    PUT(FTRP(bp), PACK(size, 1));
+    char *free_ft = FOOTER_ADDRESS(bp);
+    PUT(HEADER_ADDRESS(bp), PACK(size, 1));
+    PUT(FOOTER_ADDRESS(bp), PACK(size, 1));
 
-    PUT(FTRP(bp) + WSIZE, PACK(free_size,0));
+    PUT(FOOTER_ADDRESS(bp) + WSIZE, PACK(free_size,0));
     PUT(free_ft, PACK(free_size,0));
+    pop_free_listq(bp);
+
+    char *new_bp = FOOTER_ADDRESS(bp) + (WSIZE *2);
+    put_free_listq(new_bp);
 }
 
 
@@ -181,6 +307,9 @@ int mm_init(void)
     PUT(heap_listp + (3 * WSIZE), PACK(0, 1));
 
     heap_listp += (2 * WSIZE);
+
+    // 가용 리스트 초기화
+    free_listp = NULL;
 
     if (extend_heap(CHUNKSIZE/WSIZE) == NULL)
         return -1;
@@ -214,11 +343,14 @@ void *mm_malloc(size_t size)
         place(bp, asize);
         return bp;
     }
+
     // asize와 힙을 늘리는 최소사이즈중 큰값 고름
     extendsize = MAX(asize, CHUNKSIZE);
+
     // 힙 확장 가능 검사 + if 문으로 확장과 bp변경.
     if ((bp = extend_heap(extendsize / WSIZE)) == NULL)
         return NULL;
+
     //
     place(bp, asize);
     return bp;
@@ -230,10 +362,10 @@ void *mm_malloc(size_t size)
  */
 void mm_free(void *bp)
 {
-    size_t size = GET_SIZE(HDRP(bp));
+    size_t size = GET_SIZE(HEADER_ADDRESS(bp));
     // 헤더 푸터 0으로 변환
-    PUT(HDRP(bp), PACK(size, 0));
-    PUT(FTRP(bp), PACK(size, 0));
+    PUT(HEADER_ADDRESS(bp), PACK(size, 0));
+    PUT(FOOTER_ADDRESS(bp), PACK(size, 0));
     // free 정렬
     coalesce(bp);
 }
@@ -253,7 +385,7 @@ void *mm_realloc(void *ptr, size_t size)
     newptr = mm_malloc(size);
     if (newptr == NULL)
       return NULL;
-    copySize = GET_SIZE(HDRP(ptr));
+    copySize = GET_SIZE(HEADER_ADDRESS(ptr));
     if (size < copySize)
       copySize = size;
     memcpy(newptr, oldptr, copySize);
